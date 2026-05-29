@@ -1,7 +1,10 @@
+use crate::auth::session::read_session;
 use crate::auth::{GithubAppAuth, GithubClient};
 use crate::catalog::CatalogRegistry;
 use crate::gitea::github_read;
 use crate::gitea::{resolve_read_source, CuratedOrgs, GiteaCache, GiteaProxyClient, ReadSource};
+use crate::identity::UserId;
+use crate::store::sqlite_user_state::SqliteUserState;
 use crate::store::SharedProjectStore;
 use crate::structs::AppSettings;
 use crate::utils::json_responses::make_bad_json_data_response;
@@ -9,7 +12,7 @@ use crate::utils::paths::{check_path_components, os_slash_str};
 use crate::utils::response::{
     not_ok_bad_repo_json_response, not_ok_json_response, ok_json_response,
 };
-use rocket::http::{ContentType, Status};
+use rocket::http::{ContentType, CookieJar, Status};
 use rocket::response::status;
 use rocket::{get, State};
 use std::path::{Components, Path, PathBuf};
@@ -26,6 +29,8 @@ pub async fn get_repo_file_paths(
     catalog: &State<Arc<CatalogRegistry>>,
     app_auth: &State<Option<GithubAppAuth>>,
     github_client: &State<GithubClient>,
+    db: &State<Option<Arc<SqliteUserState>>>,
+    cookies: &CookieJar<'_>,
     repo_path: PathBuf,
 ) -> status::Custom<(ContentType, String)> {
     match resolve_read_source(curated, &repo_path) {
@@ -39,9 +44,16 @@ pub async fn get_repo_file_paths(
                     )
                 }
             };
+            let login = read_session(cookies).and_then(|uid| {
+                db.inner().as_ref().and_then(|db| {
+                    db.get_github_login(&UserId::from_github_id(uid))
+                        .ok()
+                        .flatten()
+                })
+            });
             match github_read::list_tree(
                 &parsed,
-                None,
+                login.as_deref(),
                 catalog.inner(),
                 app_auth,
                 github_client.inner(),

@@ -1,7 +1,10 @@
+use crate::auth::session::read_session;
 use crate::auth::{GithubAppAuth, GithubClient};
 use crate::catalog::CatalogRegistry;
 use crate::gitea::github_read;
 use crate::gitea::{resolve_read_source, CuratedOrgs, GiteaProxyClient, ReadSource};
+use crate::identity::UserId;
+use crate::store::sqlite_user_state::SqliteUserState;
 use crate::store::SharedProjectStore;
 use crate::structs::{AppSettings, MetadataSummary};
 use crate::utils::burrito::{summary_metadata_from_file, summary_metadata_from_str};
@@ -10,7 +13,7 @@ use crate::utils::paths::{check_path_components, os_slash_str};
 use crate::utils::response::{
     not_ok_bad_repo_json_response, not_ok_json_response, ok_json_response,
 };
-use rocket::http::{ContentType, Status};
+use rocket::http::{ContentType, CookieJar, Status};
 use rocket::response::status;
 use rocket::{get, State};
 use std::path::{Components, PathBuf};
@@ -41,14 +44,23 @@ pub async fn summary_metadata(
     catalog: &State<Arc<CatalogRegistry>>,
     app_auth: &State<Option<GithubAppAuth>>,
     github_client: &State<GithubClient>,
+    db: &State<Option<Arc<SqliteUserState>>>,
+    cookies: &CookieJar<'_>,
     repo_path: PathBuf,
 ) -> status::Custom<(ContentType, String)> {
     match resolve_read_source(curated, &repo_path) {
         ReadSource::Github(parsed) => {
             let summary = if let Some(app_auth) = app_auth.inner().as_ref() {
+                let login = read_session(cookies).and_then(|uid| {
+                    db.inner().as_ref().and_then(|db| {
+                        db.get_github_login(&UserId::from_github_id(uid))
+                            .ok()
+                            .flatten()
+                    })
+                });
                 let branch = github_read::resolve_branch(
                     &parsed,
-                    None,
+                    login.as_deref(),
                     catalog.inner(),
                     app_auth,
                     github_client.inner(),

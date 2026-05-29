@@ -1,14 +1,17 @@
+use crate::auth::session::read_session;
 use crate::auth::{GithubAppAuth, GithubClient};
 use crate::catalog::CatalogRegistry;
 use crate::gitea::github_read;
 use crate::gitea::{resolve_read_source, CuratedOrgs, GiteaProxyClient, ReadSource};
+use crate::identity::UserId;
 use crate::server::WatcherRegistry;
+use crate::store::sqlite_user_state::SqliteUserState;
 use crate::store::SharedProjectStore;
 use crate::utils::json_responses::make_bad_json_data_response;
 use crate::utils::mime::mime_types;
 use crate::utils::paths::{check_path_components, check_path_string_components, os_slash_str};
 use crate::utils::response::{not_ok_bad_repo_json_response, not_ok_json_response};
-use rocket::http::{ContentType, Status};
+use rocket::http::{ContentType, CookieJar, Status};
 use rocket::request::{FromRequest, Outcome, Request};
 use rocket::response::status;
 use rocket::response::stream::{Event, EventStream};
@@ -91,6 +94,8 @@ pub async fn raw_text_ingredient(
     catalog: &State<Arc<CatalogRegistry>>,
     app_auth: &State<Option<GithubAppAuth>>,
     github_client: &State<GithubClient>,
+    db: &State<Option<Arc<SqliteUserState>>>,
+    cookies: &CookieJar<'_>,
     repo_path: PathBuf,
     ipath: String,
 ) -> status::Custom<(ContentType, String)> {
@@ -108,9 +113,16 @@ pub async fn raw_text_ingredient(
                     )
                 }
             };
+            let login = read_session(cookies).and_then(|uid| {
+                db.inner().as_ref().and_then(|db| {
+                    db.get_github_login(&UserId::from_github_id(uid))
+                        .ok()
+                        .flatten()
+                })
+            });
             let branch = github_read::resolve_branch(
                 &parsed,
-                None,
+                login.as_deref(),
                 catalog.inner(),
                 app_auth,
                 github_client.inner(),
