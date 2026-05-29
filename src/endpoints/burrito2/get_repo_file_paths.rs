@@ -1,3 +1,6 @@
+use crate::auth::{GithubAppAuth, GithubClient};
+use crate::catalog::CatalogRegistry;
+use crate::gitea::github_read;
 use crate::gitea::{resolve_read_source, CuratedOrgs, GiteaCache, GiteaProxyClient, ReadSource};
 use crate::store::SharedProjectStore;
 use crate::structs::AppSettings;
@@ -20,9 +23,35 @@ pub async fn get_repo_file_paths(
     curated: &State<CuratedOrgs>,
     client: &State<GiteaProxyClient>,
     cache: &State<GiteaCache>,
+    catalog: &State<Arc<CatalogRegistry>>,
+    app_auth: &State<Option<GithubAppAuth>>,
+    github_client: &State<GithubClient>,
     repo_path: PathBuf,
 ) -> status::Custom<(ContentType, String)> {
     match resolve_read_source(curated, &repo_path) {
+        ReadSource::Github(parsed) => {
+            let app_auth = match app_auth.inner().as_ref() {
+                Some(a) => a,
+                None => return not_ok_json_response(
+                    Status::ServiceUnavailable,
+                    make_bad_json_data_response("GitHub App auth not configured".into()),
+                ),
+            };
+            match github_read::list_tree(&parsed, catalog.inner(), app_auth, github_client.inner()).await {
+                Ok(all_paths) => {
+                    let paths: Vec<String> = all_paths
+                        .into_iter()
+                        .filter_map(|p| p.strip_prefix("ingredients/").map(|s| s.to_string()))
+                        .filter(|p| !p.starts_with('.') && !p.ends_with(".bak") && !p.contains("/."))
+                        .collect();
+                    ok_json_response(serde_json::to_string(&paths).unwrap())
+                }
+                Err(e) => not_ok_json_response(
+                    Status::BadGateway,
+                    make_bad_json_data_response(format!("github proxy: {}", e)),
+                ),
+            }
+        }
         ReadSource::Gitea(parsed) => {
             let cache_key = format!("{}/{}/{}", parsed.server, parsed.org, parsed.repo);
             if let Some(cached) = cache.trees.get(&cache_key) {

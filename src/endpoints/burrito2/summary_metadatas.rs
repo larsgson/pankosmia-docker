@@ -1,5 +1,8 @@
 use crate::auth::session::read_session;
-use crate::gitea::{CuratedOrgs, GiteaCache, GiteaProxyClient};
+use crate::auth::{GithubAppAuth, GithubClient};
+use crate::catalog::CatalogRegistry;
+use crate::gitea::github_read;
+use crate::gitea::{CuratedOrgs, GiteaCache, GiteaProxyClient, ParsedRepoPath};
 use crate::identity::UserId;
 use crate::store::sqlite_user_state::SqliteUserState;
 use crate::store::SharedProjectStore;
@@ -37,6 +40,9 @@ pub async fn summary_metadatas(
     curated: &State<CuratedOrgs>,
     client: &State<GiteaProxyClient>,
     cache: &State<GiteaCache>,
+    catalog: &State<Arc<CatalogRegistry>>,
+    app_auth: &State<Option<GithubAppAuth>>,
+    github_client: &State<GithubClient>,
     db: &State<Option<Arc<SqliteUserState>>>,
     cookies: &CookieJar<'_>,
     org: Option<String>,
@@ -187,6 +193,45 @@ pub async fn summary_metadatas(
                     let summary = summary_metadata_from_file(metadata_path)
                         .unwrap_or_else(|_| fallback_summary());
                     repos.insert(repo_url_string, summary);
+                }
+            }
+        }
+    }
+
+    // GitHub-hosted repos: fetch metadata for any github.com/* entries in selected resources
+    if let Some(app_auth) = app_auth.inner().as_ref() {
+        if let Some(uid) = read_session(cookies) {
+            if let Some(db_ref) = db.inner().as_ref() {
+                let user_id = UserId::from_github_id(uid);
+                if let Ok(selected) = db_ref.get_selected_resources(&user_id) {
+                    for path in &selected {
+                        if !path.starts_with("github.com/") {
+                            continue;
+                        }
+                        if repos.contains_key(path) {
+                            continue;
+                        }
+                        let parts: Vec<&str> = path.splitn(3, '/').collect();
+                        if parts.len() != 3 {
+                            continue;
+                        }
+                        let parsed = ParsedRepoPath {
+                            server: parts[0].to_string(),
+                            org: parts[1].to_string(),
+                            repo: parts[2].to_string(),
+                        };
+                        let branch = github_read::default_branch(&parsed, catalog.inner(), app_auth, github_client.inner())
+                            .await
+                            .unwrap_or_else(|_| "main".to_string());
+                        let summary = match github_read::fetch_file(&parsed, "metadata.json", &branch, catalog.inner(), app_auth, github_client.inner()).await {
+                            Ok(Some(bytes)) => match String::from_utf8(bytes) {
+                                Ok(json_str) => summary_metadata_from_str(&json_str).unwrap_or_else(|_| fallback_summary()),
+                                Err(_) => fallback_summary(),
+                            },
+                            _ => fallback_summary(),
+                        };
+                        repos.insert(path.clone(), summary);
+                    }
                 }
             }
         }

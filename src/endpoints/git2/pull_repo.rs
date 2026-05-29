@@ -79,7 +79,7 @@ pub async fn pull_repo(
 ) -> status::Custom<(ContentType, String)> {
     if matches!(
         resolve_read_source(curated, &repo_path),
-        ReadSource::Gitea(_)
+        ReadSource::Gitea(_) | ReadSource::Github(_)
     ) {
         return ok_json_response(
             serde_json::to_string(&json!({

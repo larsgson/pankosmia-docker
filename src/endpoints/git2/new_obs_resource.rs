@@ -1,7 +1,7 @@
 use crate::auth::session::read_session;
 use crate::auth::{GithubAppAuth, GithubClient, LanguageHeader, TokenStore};
 use crate::catalog::CatalogRegistry;
-use crate::identity::LanguageCode;
+use crate::identity::{LanguageCode, UserId};
 use crate::server::{LanguageLocks, RateLimitError, RateLimiter};
 use crate::store::github::{apply_bulk_op, BulkFile, BulkOp};
 use crate::store::sqlite_user_state::SqliteUserState;
@@ -235,6 +235,7 @@ pub async fn new_obs_resource_repo(
         files,
     };
 
+    let lang_for_lookup = lang.clone();
     match apply_bulk_op(
         catalog.inner(),
         &user.login,
@@ -253,6 +254,18 @@ pub async fn new_obs_resource_repo(
                 "new-obs-resource: SUCCESS pr_url={} branch={}",
                 outcome.pr_url, outcome.branch
             );
+            if let Some(entry) = catalog.get(&lang_for_lookup) {
+                let resource_path = format!("github.com/{}", entry.repo);
+                if let Some(db) = sqlite.inner().as_ref() {
+                    let user_id = UserId::from_github_id(github_user_id);
+                    if let Ok(mut selected) = db.get_selected_resources(&user_id) {
+                        if !selected.iter().any(|s| s == &resource_path) {
+                            selected.push(resource_path);
+                            let _ = db.put_selected_resources(&user_id, &selected);
+                        }
+                    }
+                }
+            }
             let body = json!({
                 "is_good": true,
                 "status": outcome.status,

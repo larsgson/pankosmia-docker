@@ -1,3 +1,6 @@
+use crate::auth::{GithubAppAuth, GithubClient};
+use crate::catalog::CatalogRegistry;
+use crate::gitea::github_read;
 use crate::gitea::{resolve_read_source, CuratedOrgs, GiteaProxyClient, ReadSource};
 use crate::server::WatcherRegistry;
 use crate::store::SharedProjectStore;
@@ -14,6 +17,7 @@ use rocket::tokio::time::{self, Duration};
 use rocket::{get, State};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub struct AcceptsEventStream;
 
@@ -84,6 +88,9 @@ pub async fn raw_text_ingredient(
     store: &State<SharedProjectStore>,
     curated: &State<CuratedOrgs>,
     client: &State<GiteaProxyClient>,
+    catalog: &State<Arc<CatalogRegistry>>,
+    app_auth: &State<Option<GithubAppAuth>>,
+    github_client: &State<GithubClient>,
     repo_path: PathBuf,
     ipath: String,
 ) -> status::Custom<(ContentType, String)> {
@@ -91,6 +98,36 @@ pub async fn raw_text_ingredient(
         return not_ok_bad_repo_json_response();
     }
     match resolve_read_source(curated, &repo_path) {
+        ReadSource::Github(parsed) => {
+            let app_auth = match app_auth.inner().as_ref() {
+                Some(a) => a,
+                None => return not_ok_json_response(
+                    Status::ServiceUnavailable,
+                    make_bad_json_data_response("GitHub App auth not configured".into()),
+                ),
+            };
+            let branch = github_read::default_branch(&parsed, catalog.inner(), app_auth, github_client.inner())
+                .await
+                .unwrap_or_else(|_| "main".to_string());
+            let gh_ipath = format!("ingredients/{}", ipath);
+            match github_read::fetch_file(&parsed, &gh_ipath, &branch, catalog.inner(), app_auth, github_client.inner()).await {
+                Ok(Some(bytes)) => match String::from_utf8(bytes) {
+                    Ok(text) => status::Custom(Status::Ok, (guess_content_type(&ipath), text)),
+                    Err(e) => not_ok_json_response(
+                        Status::BadRequest,
+                        make_bad_json_data_response(format!("not valid UTF-8: {}", e)),
+                    ),
+                },
+                Ok(None) => not_ok_json_response(
+                    Status::NotFound,
+                    make_bad_json_data_response("ingredient not found".into()),
+                ),
+                Err(e) => not_ok_json_response(
+                    Status::BadGateway,
+                    make_bad_json_data_response(format!("github proxy: {}", e)),
+                ),
+            }
+        }
         ReadSource::Gitea(parsed) => {
             match client
                 .fetch_raw(&parsed.server, &parsed.org, &parsed.repo, &ipath, "master")
@@ -154,6 +191,13 @@ pub async fn watch_text_ingredient(
     ipath: String,
 ) -> EventStream![Event + 'static] {
     let mode = match resolve_read_source(curated, &repo_path) {
+        ReadSource::Github(parsed) => WatchMode::Gitea {
+            server: parsed.server,
+            org: parsed.org,
+            repo: parsed.repo,
+            ipath: ipath.clone(),
+            client: GiteaProxyClient::new(),
+        },
         ReadSource::Gitea(parsed) => WatchMode::Gitea {
             server: parsed.server,
             org: parsed.org,

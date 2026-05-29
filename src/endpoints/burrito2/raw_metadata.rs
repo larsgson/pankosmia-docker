@@ -1,3 +1,6 @@
+use crate::auth::{GithubAppAuth, GithubClient};
+use crate::catalog::CatalogRegistry;
+use crate::gitea::github_read;
 use crate::gitea::{resolve_read_source, CuratedOrgs, GiteaProxyClient, ReadSource};
 use crate::store::SharedProjectStore;
 use crate::structs::AppSettings;
@@ -10,6 +13,7 @@ use rocket::http::{ContentType, Status};
 use rocket::response::status;
 use rocket::{get, State};
 use std::path::{Components, PathBuf};
+use std::sync::Arc;
 
 #[get("/metadata/raw/<repo_path..>")]
 pub async fn raw_metadata(
@@ -17,9 +21,41 @@ pub async fn raw_metadata(
     store: &State<SharedProjectStore>,
     curated: &State<CuratedOrgs>,
     client: &State<GiteaProxyClient>,
+    catalog: &State<Arc<CatalogRegistry>>,
+    app_auth: &State<Option<GithubAppAuth>>,
+    github_client: &State<GithubClient>,
     repo_path: PathBuf,
 ) -> status::Custom<(ContentType, String)> {
     match resolve_read_source(curated, &repo_path) {
+        ReadSource::Github(parsed) => {
+            let app_auth = match app_auth.inner().as_ref() {
+                Some(a) => a,
+                None => return not_ok_json_response(
+                    Status::ServiceUnavailable,
+                    make_bad_json_data_response("GitHub App auth not configured".into()),
+                ),
+            };
+            let branch = github_read::default_branch(&parsed, catalog.inner(), app_auth, github_client.inner())
+                .await
+                .unwrap_or_else(|_| "main".to_string());
+            match github_read::fetch_file(&parsed, "metadata.json", &branch, catalog.inner(), app_auth, github_client.inner()).await {
+                Ok(Some(bytes)) => match String::from_utf8(bytes) {
+                    Ok(json_str) => ok_json_response(json_str),
+                    Err(e) => not_ok_json_response(
+                        Status::BadGateway,
+                        make_bad_json_data_response(format!("not valid UTF-8: {}", e)),
+                    ),
+                },
+                Ok(None) => not_ok_json_response(
+                    Status::NotFound,
+                    make_bad_json_data_response("metadata.json not found".into()),
+                ),
+                Err(e) => not_ok_json_response(
+                    Status::BadGateway,
+                    make_bad_json_data_response(format!("github proxy: {}", e)),
+                ),
+            }
+        }
         ReadSource::Gitea(parsed) => {
             match client
                 .fetch_raw(

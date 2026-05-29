@@ -1,3 +1,6 @@
+use crate::auth::{GithubAppAuth, GithubClient};
+use crate::catalog::CatalogRegistry;
+use crate::gitea::github_read;
 use crate::gitea::{resolve_read_source, CuratedOrgs, GiteaProxyClient, ReadSource};
 use crate::store::SharedProjectStore;
 use crate::structs::{AppSettings, BytesOrError};
@@ -8,6 +11,7 @@ use rocket::http::{ContentType, Status};
 use rocket::response::status;
 use rocket::{get, State};
 use std::path::{Components, PathBuf};
+use std::sync::Arc;
 
 #[get("/ingredient/bytes/<repo_path..>?<ipath>")]
 pub async fn raw_bytes_ingredient(
@@ -15,6 +19,9 @@ pub async fn raw_bytes_ingredient(
     store: &State<SharedProjectStore>,
     curated: &State<CuratedOrgs>,
     client: &State<GiteaProxyClient>,
+    catalog: &State<Arc<CatalogRegistry>>,
+    app_auth: &State<Option<GithubAppAuth>>,
+    github_client: &State<GithubClient>,
     repo_path: PathBuf,
     ipath: String,
 ) -> status::Custom<(ContentType, BytesOrError)> {
@@ -29,6 +36,48 @@ pub async fn raw_bytes_ingredient(
     }
 
     match resolve_read_source(curated, &repo_path) {
+        ReadSource::Github(parsed) => {
+            let app_auth = match app_auth.inner().as_ref() {
+                Some(a) => a,
+                None => return status::Custom(
+                    Status::ServiceUnavailable,
+                    (ContentType::JSON, BytesOrError::Error(make_bad_json_data_response("GitHub App auth not configured".into()))),
+                ),
+            };
+            let branch = github_read::default_branch(&parsed, catalog.inner(), app_auth, github_client.inner())
+                .await
+                .unwrap_or_else(|_| "main".to_string());
+            let gh_ipath = format!("ingredients/{}", ipath);
+            match github_read::fetch_file(&parsed, &gh_ipath, &branch, catalog.inner(), app_auth, github_client.inner()).await {
+                Ok(Some(bytes)) => {
+                    let mut split_ipath = ipath.split('.');
+                    let mut suffix = "unknown";
+                    if let Some(_) = split_ipath.next() {
+                        if let Some(second) = split_ipath.next() {
+                            suffix = second;
+                        }
+                    }
+                    status::Custom(
+                        Status::Ok,
+                        (
+                            match mime_types().get(suffix) {
+                                Some(t) => t.clone(),
+                                None => ContentType::new("application", "octet-stream"),
+                            },
+                            BytesOrError::Bytes(bytes),
+                        ),
+                    )
+                }
+                Ok(None) => status::Custom(
+                    Status::NotFound,
+                    (ContentType::JSON, BytesOrError::Error(make_bad_json_data_response("ingredient not found".into()))),
+                ),
+                Err(e) => status::Custom(
+                    Status::BadGateway,
+                    (ContentType::JSON, BytesOrError::Error(make_bad_json_data_response(format!("github proxy: {}", e)))),
+                ),
+            }
+        }
         ReadSource::Gitea(parsed) => {
             match client
                 .fetch_raw(&parsed.server, &parsed.org, &parsed.repo, &ipath, "master")

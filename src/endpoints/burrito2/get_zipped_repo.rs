@@ -1,3 +1,5 @@
+use crate::auth::{GithubAppAuth, GithubClient};
+use crate::catalog::CatalogRegistry;
 use crate::gitea::{resolve_read_source, CuratedOrgs, GiteaProxyClient, ReadSource};
 use crate::store::SharedProjectStore;
 use crate::structs::AppSettings;
@@ -9,6 +11,7 @@ use rocket::http::{ContentType, Status};
 use rocket::response::status;
 use rocket::{get, State};
 use std::path::{Components, PathBuf};
+use std::sync::Arc;
 
 #[get("/zipped/<repo_path..>")]
 pub async fn get_zipped_repo(
@@ -16,9 +19,19 @@ pub async fn get_zipped_repo(
     store: &State<SharedProjectStore>,
     curated: &State<CuratedOrgs>,
     client: &State<GiteaProxyClient>,
+    _catalog: &State<Arc<CatalogRegistry>>,
+    _app_auth: &State<Option<GithubAppAuth>>,
+    _github_client: &State<GithubClient>,
     repo_path: PathBuf,
 ) -> status::Custom<(ContentType, BytesOrError)> {
     match resolve_read_source(curated, &repo_path) {
+        ReadSource::Github(_parsed) => {
+            // GitHub archive API not yet implemented for read proxy
+            status::Custom(
+                Status::NotImplemented,
+                (ContentType::JSON, BytesOrError::Error(make_bad_json_data_response("zip download not yet supported for GitHub-hosted repos".into()))),
+            )
+        }
         ReadSource::Gitea(parsed) => {
             match client
                 .fetch_archive(&parsed.server, &parsed.org, &parsed.repo, "master")

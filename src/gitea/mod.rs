@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod client;
 pub mod config;
+pub mod github_read;
 pub mod routing;
 
 pub use cache::GiteaCache;

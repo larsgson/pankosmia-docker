@@ -34,7 +34,7 @@ pub async fn delete_repo(
 
     if matches!(
         resolve_read_source(curated, &repo_path),
-        ReadSource::Gitea(_)
+        ReadSource::Gitea(_) | ReadSource::Github(_)
     ) {
         if let Some(uid) = read_session(cookies) {
             if let Some(db) = db.inner().as_ref() {
