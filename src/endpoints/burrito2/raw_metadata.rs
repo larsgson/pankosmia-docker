@@ -30,15 +30,31 @@ pub async fn raw_metadata(
         ReadSource::Github(parsed) => {
             let app_auth = match app_auth.inner().as_ref() {
                 Some(a) => a,
-                None => return not_ok_json_response(
-                    Status::ServiceUnavailable,
-                    make_bad_json_data_response("GitHub App auth not configured".into()),
-                ),
+                None => {
+                    return not_ok_json_response(
+                        Status::ServiceUnavailable,
+                        make_bad_json_data_response("GitHub App auth not configured".into()),
+                    )
+                }
             };
-            let branch = github_read::default_branch(&parsed, catalog.inner(), app_auth, github_client.inner())
-                .await
-                .unwrap_or_else(|_| "main".to_string());
-            match github_read::fetch_file(&parsed, "metadata.json", &branch, catalog.inner(), app_auth, github_client.inner()).await {
+            let branch = github_read::default_branch(
+                &parsed,
+                catalog.inner(),
+                app_auth,
+                github_client.inner(),
+            )
+            .await
+            .unwrap_or_else(|_| "main".to_string());
+            match github_read::fetch_file(
+                &parsed,
+                "metadata.json",
+                &branch,
+                catalog.inner(),
+                app_auth,
+                github_client.inner(),
+            )
+            .await
+            {
                 Ok(Some(bytes)) => match String::from_utf8(bytes) {
                     Ok(json_str) => ok_json_response(json_str),
                     Err(e) => not_ok_json_response(

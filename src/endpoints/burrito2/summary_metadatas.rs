@@ -220,12 +220,27 @@ pub async fn summary_metadatas(
                             org: parts[1].to_string(),
                             repo: parts[2].to_string(),
                         };
-                        let branch = github_read::default_branch(&parsed, catalog.inner(), app_auth, github_client.inner())
-                            .await
-                            .unwrap_or_else(|_| "main".to_string());
-                        let summary = match github_read::fetch_file(&parsed, "metadata.json", &branch, catalog.inner(), app_auth, github_client.inner()).await {
+                        let branch = github_read::default_branch(
+                            &parsed,
+                            catalog.inner(),
+                            app_auth,
+                            github_client.inner(),
+                        )
+                        .await
+                        .unwrap_or_else(|_| "main".to_string());
+                        let summary = match github_read::fetch_file(
+                            &parsed,
+                            "metadata.json",
+                            &branch,
+                            catalog.inner(),
+                            app_auth,
+                            github_client.inner(),
+                        )
+                        .await
+                        {
                             Ok(Some(bytes)) => match String::from_utf8(bytes) {
-                                Ok(json_str) => summary_metadata_from_str(&json_str).unwrap_or_else(|_| fallback_summary()),
+                                Ok(json_str) => summary_metadata_from_str(&json_str)
+                                    .unwrap_or_else(|_| fallback_summary()),
                                 Err(_) => fallback_summary(),
                             },
                             _ => fallback_summary(),

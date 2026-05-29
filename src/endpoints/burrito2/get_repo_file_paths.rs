@@ -32,17 +32,23 @@ pub async fn get_repo_file_paths(
         ReadSource::Github(parsed) => {
             let app_auth = match app_auth.inner().as_ref() {
                 Some(a) => a,
-                None => return not_ok_json_response(
-                    Status::ServiceUnavailable,
-                    make_bad_json_data_response("GitHub App auth not configured".into()),
-                ),
+                None => {
+                    return not_ok_json_response(
+                        Status::ServiceUnavailable,
+                        make_bad_json_data_response("GitHub App auth not configured".into()),
+                    )
+                }
             };
-            match github_read::list_tree(&parsed, catalog.inner(), app_auth, github_client.inner()).await {
+            match github_read::list_tree(&parsed, catalog.inner(), app_auth, github_client.inner())
+                .await
+            {
                 Ok(all_paths) => {
                     let paths: Vec<String> = all_paths
                         .into_iter()
                         .filter_map(|p| p.strip_prefix("ingredients/").map(|s| s.to_string()))
-                        .filter(|p| !p.starts_with('.') && !p.ends_with(".bak") && !p.contains("/."))
+                        .filter(|p| {
+                            !p.starts_with('.') && !p.ends_with(".bak") && !p.contains("/.")
+                        })
                         .collect();
                     ok_json_response(serde_json::to_string(&paths).unwrap())
                 }

@@ -29,7 +29,12 @@ pub async fn get_zipped_repo(
             // GitHub archive API not yet implemented for read proxy
             status::Custom(
                 Status::NotImplemented,
-                (ContentType::JSON, BytesOrError::Error(make_bad_json_data_response("zip download not yet supported for GitHub-hosted repos".into()))),
+                (
+                    ContentType::JSON,
+                    BytesOrError::Error(make_bad_json_data_response(
+                        "zip download not yet supported for GitHub-hosted repos".into(),
+                    )),
+                ),
             )
         }
         ReadSource::Gitea(parsed) => {

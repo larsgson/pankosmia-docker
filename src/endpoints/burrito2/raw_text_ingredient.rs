@@ -101,16 +101,32 @@ pub async fn raw_text_ingredient(
         ReadSource::Github(parsed) => {
             let app_auth = match app_auth.inner().as_ref() {
                 Some(a) => a,
-                None => return not_ok_json_response(
-                    Status::ServiceUnavailable,
-                    make_bad_json_data_response("GitHub App auth not configured".into()),
-                ),
+                None => {
+                    return not_ok_json_response(
+                        Status::ServiceUnavailable,
+                        make_bad_json_data_response("GitHub App auth not configured".into()),
+                    )
+                }
             };
-            let branch = github_read::default_branch(&parsed, catalog.inner(), app_auth, github_client.inner())
-                .await
-                .unwrap_or_else(|_| "main".to_string());
+            let branch = github_read::default_branch(
+                &parsed,
+                catalog.inner(),
+                app_auth,
+                github_client.inner(),
+            )
+            .await
+            .unwrap_or_else(|_| "main".to_string());
             let gh_ipath = format!("ingredients/{}", ipath);
-            match github_read::fetch_file(&parsed, &gh_ipath, &branch, catalog.inner(), app_auth, github_client.inner()).await {
+            match github_read::fetch_file(
+                &parsed,
+                &gh_ipath,
+                &branch,
+                catalog.inner(),
+                app_auth,
+                github_client.inner(),
+            )
+            .await
+            {
                 Ok(Some(bytes)) => match String::from_utf8(bytes) {
                     Ok(text) => status::Custom(Status::Ok, (guess_content_type(&ipath), text)),
                     Err(e) => not_ok_json_response(
