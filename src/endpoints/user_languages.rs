@@ -215,9 +215,11 @@ pub fn get_current_language(
 }
 
 /// `POST /current-language/<code>` — switch working language.
+/// Auto-claims the language if it's in the catalog but not yet claimed.
 #[post("/current-language/<code>")]
 pub fn post_current_language(
     user: AuthUser,
+    catalog: &State<Arc<CatalogRegistry>>,
     db: &State<Option<Arc<SqliteUserState>>>,
     code: &str,
 ) -> status::Custom<(ContentType, String)> {
@@ -239,7 +241,7 @@ pub fn post_current_language(
             )
         }
     };
-    let claimed = match db.get_claimed_languages(&user.id) {
+    let mut claimed = match db.get_claimed_languages(&user.id) {
         Ok(c) => c,
         Err(e) => {
             return not_ok_json_response(
@@ -249,10 +251,21 @@ pub fn post_current_language(
         }
     };
     if !claimed.iter().any(|c| c == &lang) {
-        return not_ok_json_response(
-            Status::Forbidden,
-            make_bad_json_data_response(format!("language {} not in your claimed languages", code)),
-        );
+        if !catalog.contains(&lang) {
+            return not_ok_json_response(
+                Status::NotFound,
+                make_bad_json_data_response(format!("language {} not in catalog", code)),
+            );
+        }
+        let max = max_user_languages();
+        if claimed.len() >= max {
+            return not_ok_json_response(
+                Status::Forbidden,
+                make_bad_json_data_response(format!("maximum {} languages per user reached", max)),
+            );
+        }
+        claimed.push(lang.clone());
+        let _ = db.put_claimed_languages(&user.id, &claimed);
     }
     if let Err(e) = db.put_current_language(&user.id, &lang) {
         return not_ok_json_response(
