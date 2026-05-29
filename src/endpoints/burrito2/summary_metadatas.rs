@@ -14,7 +14,7 @@ use crate::utils::response::ok_json_response;
 use rocket::http::{ContentType, CookieJar};
 use rocket::response::status;
 use rocket::{get, State};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 fn fallback_summary() -> MetadataSummary {
@@ -39,233 +39,118 @@ pub async fn summary_metadatas(
     store: &State<SharedProjectStore>,
     curated: &State<CuratedOrgs>,
     client: &State<GiteaProxyClient>,
-    cache: &State<GiteaCache>,
+    _cache: &State<GiteaCache>,
     catalog: &State<Arc<CatalogRegistry>>,
     app_auth: &State<Option<GithubAppAuth>>,
     github_client: &State<GithubClient>,
     db: &State<Option<Arc<SqliteUserState>>>,
     cookies: &CookieJar<'_>,
-    org: Option<String>,
+    #[allow(unused)] org: Option<String>,
 ) -> status::Custom<(ContentType, String)> {
+    // Get the user's selected resources first — only fetch metadata for those.
+    let (selected, login) = match read_session(cookies) {
+        Some(uid) => match db.inner().as_ref() {
+            Some(db_ref) => {
+                let user_id = UserId::from_github_id(uid);
+                let sel = db_ref.get_selected_resources(&user_id).unwrap_or_default();
+                let login = db_ref.get_github_login(&user_id).ok().flatten();
+                (sel, login)
+            }
+            None => (Vec::new(), None),
+        },
+        None => (Vec::new(), None),
+    };
+
+    if selected.is_empty() {
+        return ok_json_response("{}".to_string());
+    }
+
     let mut repos: BTreeMap<String, MetadataSummary> = BTreeMap::new();
 
-    // Curated orgs: fetch from Gitea API (cached)
-    for (server, org_name) in curated.iter_orgs() {
-        let server_org = format!("{}/{}", server, org_name);
-        if let Some(ref filter) = org {
-            if *filter != server_org {
-                continue;
-            }
-        }
-        let cache_key = server_org.clone();
-        if let Some(cached) = cache.summaries.get(&cache_key) {
-            for (k, v) in cached.as_ref() {
-                repos.insert(
-                    k.clone(),
-                    MetadataSummary {
-                        name: v.name.clone(),
-                        description: v.description.clone(),
-                        abbreviation: v.abbreviation.clone(),
-                        generated_date: v.generated_date.clone(),
-                        flavor_type: v.flavor_type.clone(),
-                        flavor: v.flavor.clone(),
-                        language_code: v.language_code.clone(),
-                        language_name: v.language_name.clone(),
-                        script_direction: v.script_direction.clone(),
-                        book_codes: v.book_codes.clone(),
-                        timestamp: v.timestamp,
-                    },
-                );
-            }
-            continue;
-        }
-
-        let org_repos = match client.list_org_repos(server, org_name).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("WARN: could not list repos for {}: {}", server_org, e);
-                continue;
-            }
-        };
-
-        let mut org_summaries: BTreeMap<String, MetadataSummary> = BTreeMap::new();
-        for repo_val in &org_repos {
-            let repo_name = match repo_val.get("name").and_then(|n| n.as_str()) {
-                Some(n) => n,
+    for path in &selected {
+        if path.starts_with("github.com/") {
+            // GitHub-hosted repo: fetch metadata via GitHub API
+            let app_auth = match app_auth.inner().as_ref() {
+                Some(a) => a,
                 None => continue,
             };
-            let repo_key = format!("{}/{}/{}", server, org_name, repo_name);
-            let summary = match client
-                .fetch_raw(server, org_name, repo_name, "metadata.json", "master")
-                .await
+            let parts: Vec<&str> = path.splitn(3, '/').collect();
+            if parts.len() != 3 {
+                continue;
+            }
+            let parsed = ParsedRepoPath {
+                server: parts[0].to_string(),
+                org: parts[1].to_string(),
+                repo: parts[2].to_string(),
+            };
+            let branch = github_read::resolve_branch(
+                &parsed,
+                login.as_deref(),
+                catalog.inner(),
+                app_auth,
+                github_client.inner(),
+            )
+            .await
+            .unwrap_or_else(|_| "main".to_string());
+            let summary = match github_read::fetch_file(
+                &parsed,
+                "metadata.json",
+                &branch,
+                catalog.inner(),
+                app_auth,
+                github_client.inner(),
+            )
+            .await
             {
-                Ok((_ct, bytes)) => match String::from_utf8(bytes) {
+                Ok(Some(bytes)) => match String::from_utf8(bytes) {
                     Ok(json_str) => {
                         summary_metadata_from_str(&json_str).unwrap_or_else(|_| fallback_summary())
                     }
                     Err(_) => fallback_summary(),
                 },
-                Err(_) => continue,
+                _ => fallback_summary(),
             };
-            org_summaries.insert(repo_key, summary);
-        }
-
-        cache
-            .summaries
-            .insert(cache_key, Arc::new(org_summaries.clone()));
-        repos.extend(org_summaries);
-    }
-
-    // Local filesystem: walk for non-curated orgs
-    let root_path = store.workspace_root().to_string_lossy().into_owned();
-    if let Ok(server_paths) = std::fs::read_dir(&root_path) {
-        for server_path in server_paths {
-            let uw_server_path_ob = match server_path {
-                Ok(p) => p.path(),
-                Err(_) => continue,
-            };
-            let server_leaf = match uw_server_path_ob.file_name().and_then(|s| s.to_str()) {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            if server_leaf.starts_with('.') || !uw_server_path_ob.is_dir() {
+            repos.insert(path.clone(), summary);
+        } else {
+            // Curated org or local: check Gitea cache, then fetch, then local FS
+            let parts: Vec<&str> = path.splitn(3, '/').collect();
+            if parts.len() != 3 {
                 continue;
             }
-            let org_entries = match std::fs::read_dir(&uw_server_path_ob) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            for org_path in org_entries {
-                let uw_org_path_ob = match org_path {
-                    Ok(p) => p.path(),
-                    Err(_) => continue,
-                };
-                let org_leaf = match uw_org_path_ob.file_name().and_then(|s| s.to_str()) {
-                    Some(s) => s.to_string(),
-                    None => continue,
-                };
-                let server_org = format!("{}/{}", server_leaf, org_leaf);
+            let server_org = format!("{}/{}", parts[0], parts[1]);
 
-                // Skip curated orgs (already fetched from Gitea)
-                if curated.is_curated(&server_org) {
-                    continue;
-                }
-
-                if let Some(ref filter) = org {
-                    if *filter != server_org {
-                        continue;
+            if curated.is_curated(&server_org) {
+                // Try Gitea proxy
+                match client
+                    .fetch_raw(parts[0], parts[1], parts[2], "metadata.json", "master")
+                    .await
+                {
+                    Ok((_ct, bytes)) => {
+                        if let Ok(json_str) = String::from_utf8(bytes) {
+                            let summary = summary_metadata_from_str(&json_str)
+                                .unwrap_or_else(|_| fallback_summary());
+                            repos.insert(path.clone(), summary);
+                        }
                     }
-                } else {
-                    if server_org == "_local_/_quarantine_"
-                        || server_org == "_local_/_archive_"
-                        || server_org == "_local_/_updates_"
-                    {
-                        continue;
+                    Err(_) => {
+                        repos.insert(path.clone(), fallback_summary());
                     }
                 }
-                if org_leaf.starts_with('.') || !uw_org_path_ob.is_dir() {
-                    continue;
-                }
-                let repo_entries = match std::fs::read_dir(&uw_org_path_ob) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                for repo_path in repo_entries {
-                    let uw_repo_path_ob = match repo_path {
-                        Ok(p) => p.path(),
-                        Err(_) => continue,
-                    };
-                    let repo_leaf = match uw_repo_path_ob.file_name().and_then(|s| s.to_str()) {
-                        Some(s) => s.to_string(),
-                        None => continue,
-                    };
-                    if repo_leaf.starts_with('.') || !uw_repo_path_ob.is_dir() {
-                        continue;
-                    }
-                    let repo_url_string = format!("{}/{}/{}", server_leaf, org_leaf, repo_leaf);
-                    let metadata_path = format!(
-                        "{}{}{}{}metadata.json",
-                        root_path,
-                        os_slash_str(),
-                        &repo_url_string,
-                        os_slash_str()
-                    );
-                    let summary = summary_metadata_from_file(metadata_path)
-                        .unwrap_or_else(|_| fallback_summary());
-                    repos.insert(repo_url_string, summary);
-                }
+            } else {
+                // Local filesystem
+                let metadata_path = format!(
+                    "{}{}{}{}metadata.json",
+                    store.workspace_root().to_string_lossy(),
+                    os_slash_str(),
+                    path,
+                    os_slash_str()
+                );
+                let summary = summary_metadata_from_file(metadata_path)
+                    .unwrap_or_else(|_| fallback_summary());
+                repos.insert(path.clone(), summary);
             }
         }
     }
-
-    // GitHub-hosted repos: fetch metadata for any github.com/* entries in selected resources
-    if let Some(app_auth) = app_auth.inner().as_ref() {
-        if let Some(uid) = read_session(cookies) {
-            if let Some(db_ref) = db.inner().as_ref() {
-                let user_id = UserId::from_github_id(uid);
-                let login = db_ref.get_github_login(&user_id).ok().flatten();
-                let login_ref = login.as_deref();
-                if let Ok(selected) = db_ref.get_selected_resources(&user_id) {
-                    for path in &selected {
-                        if !path.starts_with("github.com/") {
-                            continue;
-                        }
-                        if repos.contains_key(path) {
-                            continue;
-                        }
-                        let parts: Vec<&str> = path.splitn(3, '/').collect();
-                        if parts.len() != 3 {
-                            continue;
-                        }
-                        let parsed = ParsedRepoPath {
-                            server: parts[0].to_string(),
-                            org: parts[1].to_string(),
-                            repo: parts[2].to_string(),
-                        };
-                        let branch = github_read::resolve_branch(
-                            &parsed,
-                            login_ref,
-                            catalog.inner(),
-                            app_auth,
-                            github_client.inner(),
-                        )
-                        .await
-                        .unwrap_or_else(|_| "main".to_string());
-                        let summary = match github_read::fetch_file(
-                            &parsed,
-                            "metadata.json",
-                            &branch,
-                            catalog.inner(),
-                            app_auth,
-                            github_client.inner(),
-                        )
-                        .await
-                        {
-                            Ok(Some(bytes)) => match String::from_utf8(bytes) {
-                                Ok(json_str) => summary_metadata_from_str(&json_str)
-                                    .unwrap_or_else(|_| fallback_summary()),
-                                Err(_) => fallback_summary(),
-                            },
-                            _ => fallback_summary(),
-                        };
-                        repos.insert(path.clone(), summary);
-                    }
-                }
-            }
-        }
-    }
-
-    // Filter to only the user's selected resources. No session = empty.
-    let selected = read_session(cookies)
-        .and_then(|uid| {
-            db.inner().as_ref().and_then(|db| {
-                let user_id = UserId::from_github_id(uid);
-                db.get_selected_resources(&user_id).ok()
-            })
-        })
-        .unwrap_or_default();
-    let selected_set: HashSet<&str> = selected.iter().map(|s| s.as_str()).collect();
-    repos.retain(|k, _| selected_set.contains(k.as_str()));
 
     ok_json_response(serde_json::to_string(&repos).unwrap())
 }
