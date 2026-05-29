@@ -254,10 +254,10 @@ pub async fn new_obs_resource_repo(
                 "new-obs-resource: SUCCESS pr_url={} branch={}",
                 outcome.pr_url, outcome.branch
             );
-            if let Some(entry) = catalog.get(&lang_for_lookup) {
-                let resource_path = format!("github.com/{}", entry.repo);
-                if let Some(db) = sqlite.inner().as_ref() {
-                    let user_id = UserId::from_github_id(github_user_id);
+            if let Some(db) = sqlite.inner().as_ref() {
+                let user_id = UserId::from_github_id(github_user_id);
+                if let Some(entry) = catalog.get(&lang_for_lookup) {
+                    let resource_path = format!("github.com/{}", entry.repo);
                     if let Ok(mut selected) = db.get_selected_resources(&user_id) {
                         if !selected.iter().any(|s| s == &resource_path) {
                             selected.push(resource_path);
@@ -265,6 +265,13 @@ pub async fn new_obs_resource_repo(
                         }
                     }
                 }
+                if let Ok(mut claimed) = db.get_claimed_languages(&user_id) {
+                    if !claimed.iter().any(|c| c == &lang_for_lookup) {
+                        claimed.push(lang_for_lookup.clone());
+                        let _ = db.put_claimed_languages(&user_id, &claimed);
+                    }
+                }
+                let _ = db.put_current_language(&user_id, &lang_for_lookup);
             }
             let body = json!({
                 "is_good": true,
