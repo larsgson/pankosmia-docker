@@ -46,8 +46,9 @@ pub async fn summary_metadata(
     match resolve_read_source(curated, &repo_path) {
         ReadSource::Github(parsed) => {
             let summary = if let Some(app_auth) = app_auth.inner().as_ref() {
-                let branch = github_read::default_branch(
+                let branch = github_read::resolve_branch(
                     &parsed,
+                    None,
                     catalog.inner(),
                     app_auth,
                     github_client.inner(),

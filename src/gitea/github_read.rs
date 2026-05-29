@@ -52,21 +52,20 @@ pub async fn fetch_file(
 
 pub async fn list_tree(
     parsed: &ParsedRepoPath,
+    login: Option<&str>,
     catalog: &Arc<CatalogRegistry>,
     app_auth: &GithubAppAuth,
     github_client: &GithubClient,
 ) -> Result<Vec<String>, GithubReadError> {
     let (token, repo_full) = resolve_token(parsed, catalog, app_auth).await?;
-    let repo = github_client
-        .get_repo(&token, &repo_full)
+    let branch = resolve_branch(parsed, login, catalog, app_auth, github_client)
         .await
-        .map_err(|e| GithubReadError(format!("get repo: {}", e)))?;
-    let default_branch = repo.default_branch.unwrap_or_else(|| "main".into());
+        .unwrap_or_else(|_| "main".to_string());
     let commit_sha = github_client
-        .get_branch_sha(&token, &repo_full, &default_branch)
+        .get_branch_sha(&token, &repo_full, &branch)
         .await
         .map_err(|e| GithubReadError(format!("get branch sha: {}", e)))?
-        .ok_or_else(|| GithubReadError(format!("branch {} not found", default_branch)))?;
+        .ok_or_else(|| GithubReadError(format!("branch {} not found", branch)))?;
     let tree_sha = github_client
         .get_commit_tree_sha(&token, &repo_full, &commit_sha)
         .await
@@ -82,13 +81,23 @@ pub async fn list_tree(
         .collect())
 }
 
-pub async fn default_branch(
+pub async fn resolve_branch(
     parsed: &ParsedRepoPath,
+    login: Option<&str>,
     catalog: &Arc<CatalogRegistry>,
     app_auth: &GithubAppAuth,
     github_client: &GithubClient,
 ) -> Result<String, GithubReadError> {
     let (token, repo_full) = resolve_token(parsed, catalog, app_auth).await?;
+    if let Some(login) = login {
+        let working = format!("pankosmia-edit-{}", login);
+        if let Ok(Some(_)) = github_client
+            .get_branch_sha(&token, &repo_full, &working)
+            .await
+        {
+            return Ok(working);
+        }
+    }
     let repo = github_client
         .get_repo(&token, &repo_full)
         .await

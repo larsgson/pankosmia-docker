@@ -37,8 +37,9 @@ pub async fn raw_metadata(
                     )
                 }
             };
-            let branch = github_read::default_branch(
+            let branch = github_read::resolve_branch(
                 &parsed,
+                None,
                 catalog.inner(),
                 app_auth,
                 github_client.inner(),

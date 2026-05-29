@@ -18,6 +18,7 @@ use crate::auth::session::{
     clear_oauth_state, clear_session, read_oauth_state, read_session, set_oauth_state, set_session,
 };
 use crate::auth::token_store::TokenStore;
+use crate::store::sqlite_user_state::SqliteUserState;
 use crate::utils::json_responses::make_bad_json_data_response;
 use crate::utils::response::{not_ok_json_response, ok_json_response};
 use rocket::http::{ContentType, CookieJar, Status};
@@ -26,6 +27,7 @@ use rocket::response::status;
 use rocket::response::Redirect;
 use rocket::{get, post, State};
 use serde::Serialize;
+use std::sync::Arc;
 use uuid::Uuid;
 
 // No `scope` query parameter is sent. The GitHub App's user-to-server
@@ -133,6 +135,7 @@ pub async fn auth_github_callback(
     cookies: &CookieJar<'_>,
     client: &State<GithubClient>,
     tokens: &State<TokenStore>,
+    db: &State<Option<Arc<SqliteUserState>>>,
     code: Option<String>,
     state: Option<String>,
 ) -> Result<Redirect, status::Custom<(ContentType, String)>> {
@@ -182,6 +185,11 @@ pub async fn auth_github_callback(
         )
     })?;
     set_session(cookies, user.id);
+
+    if let Some(db) = db.inner().as_ref() {
+        let user_id = crate::identity::UserId::from_github_id(user.id);
+        let _ = db.put_github_login(&user_id, &user.login);
+    }
 
     // Decode the original redirect path from the state.
     let redirect_to = state

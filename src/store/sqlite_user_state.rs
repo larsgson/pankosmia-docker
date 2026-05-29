@@ -244,6 +244,14 @@ impl SqliteUserState {
         self.put_user(user, "selected_resources", &json)
     }
 
+    pub fn get_github_login(&self, user: &UserId) -> StoreResult<Option<String>> {
+        self.get_user(user, "github_login")
+    }
+
+    pub fn put_github_login(&self, user: &UserId, login: &str) -> StoreResult<()> {
+        self.put_user(user, "github_login", login)
+    }
+
     // -- auth tokens -----------------------------------------------------
 
     pub fn get_auth_token(&self, user: &UserId, key: &str) -> StoreResult<Option<String>> {

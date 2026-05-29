@@ -203,6 +203,8 @@ pub async fn summary_metadatas(
         if let Some(uid) = read_session(cookies) {
             if let Some(db_ref) = db.inner().as_ref() {
                 let user_id = UserId::from_github_id(uid);
+                let login = db_ref.get_github_login(&user_id).ok().flatten();
+                let login_ref = login.as_deref();
                 if let Ok(selected) = db_ref.get_selected_resources(&user_id) {
                     for path in &selected {
                         if !path.starts_with("github.com/") {
@@ -220,8 +222,9 @@ pub async fn summary_metadatas(
                             org: parts[1].to_string(),
                             repo: parts[2].to_string(),
                         };
-                        let branch = github_read::default_branch(
+                        let branch = github_read::resolve_branch(
                             &parsed,
+                            login_ref,
                             catalog.inner(),
                             app_auth,
                             github_client.inner(),

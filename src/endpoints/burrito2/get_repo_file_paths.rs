@@ -39,8 +39,14 @@ pub async fn get_repo_file_paths(
                     )
                 }
             };
-            match github_read::list_tree(&parsed, catalog.inner(), app_auth, github_client.inner())
-                .await
+            match github_read::list_tree(
+                &parsed,
+                None,
+                catalog.inner(),
+                app_auth,
+                github_client.inner(),
+            )
+            .await
             {
                 Ok(all_paths) => {
                     let paths: Vec<String> = all_paths
